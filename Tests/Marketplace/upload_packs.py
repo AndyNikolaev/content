@@ -19,6 +19,17 @@ from demisto_sdk.commands.common.tools import run_command, str2bool
 
 from Tests.scripts.utils.log_util import install_logging
 
+METADATA_TO_REMOVE = {
+    'IAM/metadata-1.1.0.json',
+    'IAM/metadata-1.2.0.json',
+    'IAM/metadata-1.0.0.json',
+    'IAM/metadata-1.3.0.json',
+    'HelloWorldPremium/metadata-1.0.0.json',
+    'HelloWorldPremium/metadata-1.1.0.json',
+    'HelloWorldPremium/metadata-1.0.8.json',
+    'HelloWorldPremium/metadata-1.0.9.json',
+}
+
 
 def get_packs_names(target_packs: str, previous_commit_hash: str = "HEAD^") -> set:
     """Detects and returns packs names to upload.
@@ -168,6 +179,7 @@ def update_index_folder(index_folder_path: str, pack_name: str, pack_path: str, 
             if os.path.exists(index_pack_path):
                 shutil.rmtree(index_pack_path)  # remove pack folder inside index in case that it exists
             logging.warning(f"Skipping updating {pack_name} pack files to index")
+            task_status = True
             return True
 
         # Copy new files and add metadata for latest version
@@ -280,6 +292,20 @@ def upload_index_to_storage(index_folder_path: str, extract_destination_path: st
         json.dump(index, index_file, indent=4)
 
     index_zip_name = os.path.basename(index_folder_path)
+
+    # REMOVE AFTER SUCCESSFUL RUN
+    logging.info("Starting to remove old meta files")
+    iam_metadata = glob.glob(f"{index_folder_path}/IAM/metadata-*.json")
+    for iam_meta in iam_metadata:
+        if any(x in iam_meta for x in METADATA_TO_REMOVE):
+            logging.info(f"Removing - {iam_meta}")
+            os.remove(iam_meta)
+    hwp_metadata = glob.glob(f"{index_folder_path}/HelloWorldPremium/metadata-*.json")
+    for hwp_meta in hwp_metadata:
+        if any(x in hwp_meta for x in METADATA_TO_REMOVE):
+            logging.info(f"Removing - {hwp_meta}")
+            os.remove(hwp_meta)
+
     index_zip_path = shutil.make_archive(base_name=index_folder_path, format="zip",
                                          root_dir=extract_destination_path, base_dir=index_zip_name)
     try:
@@ -874,18 +900,26 @@ def main():
             pack.cleanup()
             continue
 
+        task_status, pack_was_modified = pack.detect_modified(content_repo, index_folder_path, current_commit_hash,
+                                                              previous_commit_hash)
+        if not task_status:
+            pack.status = PackStatus.FAILED_DETECTING_MODIFIED_FILES.name
+            pack.cleanup()
+            continue
+
         task_status = pack.format_metadata(user_metadata=user_metadata, pack_content_items=pack_content_items,
                                            integration_images=integration_images, author_image=author_image,
                                            index_folder_path=index_folder_path,
                                            packs_dependencies_mapping=packs_dependencies_mapping,
                                            build_number=build_number, commit_hash=current_commit_hash,
-                                           packs_statistic_df=packs_statistic_df)
+                                           packs_statistic_df=packs_statistic_df,
+                                           pack_was_modified=pack_was_modified)
         if not task_status:
             pack.status = PackStatus.FAILED_METADATA_PARSING.name
             pack.cleanup()
             continue
 
-        task_status, not_updated_build = pack.prepare_release_notes(index_folder_path, build_number)
+        task_status, not_updated_build = pack.prepare_release_notes(index_folder_path, build_number, pack_was_modified)
         if not task_status:
             pack.status = PackStatus.FAILED_RELEASE_NOTES.name
             pack.cleanup()
@@ -911,13 +945,6 @@ def main():
         task_status, zip_pack_path = pack.zip_pack()
         if not task_status:
             pack.status = PackStatus.FAILED_ZIPPING_PACK_ARTIFACTS.name
-            pack.cleanup()
-            continue
-
-        task_status, pack_was_modified = pack.detect_modified(content_repo, index_folder_path, current_commit_hash,
-                                                              previous_commit_hash)
-        if not task_status:
-            pack.status = PackStatus.FAILED_DETECTING_MODIFIED_FILES.name
             pack.cleanup()
             continue
 
